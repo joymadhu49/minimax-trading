@@ -10,7 +10,7 @@ const UNIVERSAL_ROUTER = '0x6ff5693b99212da76ad316178a184ab56d299b43' as `0x${st
 const WETH = '0x4200000000000000000000000000000000000006' as `0x${string}`;
 
 // Universal Router commands
-const V4_SWAP = 0x10n;
+const V4_SWAP = BigInt(0x10);
 
 // V4SwapRouter ABI for exactInputSingle
 const V4_ROUTER_ABI = [{
@@ -118,7 +118,7 @@ export function SwapWidget() {
       const amountIn = parseEther(ethAmount);
       // 10% slippage for safety
       const expectedOut = parseEther(ethAmount) / BigInt(Math.floor(miniPrice * 1e18)) * BigInt(1e18);
-      const amountOutMinimum = expectedOut * 90n / 100n;
+      const amountOutMinimum = expectedOut * BigInt(90) / BigInt(100);
 
       // Build the swap data using V4SwapRouter.exactInputSingle
       const swapData = encodeFunctionData({
@@ -132,7 +132,7 @@ export function SwapWidget() {
           recipient: address,
           amountIn: amountIn,
           amountOutMinimum: amountOutMinimum,
-          sqrtPriceLimitX96: 0n,
+          sqrtPriceLimitX96: BigInt(0),
         }],
       });
 

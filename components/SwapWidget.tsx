@@ -176,7 +176,6 @@ export function SwapWidget() {
         to: tx.to as `0x${string}`,
         data: tx.data as `0x${string}`,
         value: BigInt(tx.value),
-        gasPrice: tx.gasPrice as `0x${string}`,
       });
     } catch (err) {
       console.error('Swap error:', err);

@@ -1,41 +1,44 @@
 'use client';
 
-import { MINI_TOKEN } from '@/lib/config';
-import { useState, useEffect, useCallback } from 'react';
+import { MINI_TOKEN, WETH_TOKEN } from '@/lib/config';
+import { useState, useEffect } from 'react';
 import { useAccount, useBalance, useSendTransaction, useWaitForTransactionReceipt } from 'wagmi';
-import { parseEther, formatEther, formatUnits } from 'viem';
+import { parseEther, formatEther, formatUnits, encodeFunctionData, keccak256, toHex } from 'viem';
 
-const ONE_INCH_API = 'https://api.1inch.dev/swap/v6.0/8453';
-const CHAIN_ID = 8453; // Base
+// Uniswap V4 contracts on Base
+const UNIVERSAL_ROUTER = '0x6ff5693b99212da76ad316178a184ab56d299b43' as `0x${string}`;
+const WETH = '0x4200000000000000000000000000000000000006' as `0x${string}`;
 
-// 1Inch API key - using public key (rate limited but works for testing)
-const API_KEY = 'K2C-22BsSdcRGLybBxS9LVZ2w4rRyKWc';
+// Universal Router commands
+const V4_SWAP = 0x10n;
 
-interface OneInchQuote {
-  toTokenAmount: string;
-  fromTokenAmount: string;
-  protocols: { name: string; part: number }[][][];
-  estimatedGas: number;
-}
-
-interface OneInchSwap {
-  tx: {
-    from: string;
-    to: string;
-    data: string;
-    value: string;
-    gasPrice: string;
-    gas: number;
-  };
-}
+// V4SwapRouter ABI for exactInputSingle
+const V4_ROUTER_ABI = [{
+  type: 'function',
+  name: 'exactInputSingle',
+  stateMutability: 'payable',
+  inputs: [{
+    name: 'params',
+    type: 'tuple',
+    components: [
+      { name: 'tokenIn', type: 'address' },
+      { name: 'tokenOut', type: 'address' },
+      { name: 'fee', type: 'uint24' },
+      { name: 'tickSpacing', type: 'int24' },
+      { name: 'recipient', type: 'address' },
+      { name: 'amountIn', type: 'uint256' },
+      { name: 'amountOutMinimum', type: 'uint256' },
+      { name: 'sqrtPriceLimitX96', type: 'uint160' },
+    ],
+  }],
+  outputs: [{ name: 'amountOut', type: 'uint256' }],
+}] as const;
 
 export function SwapWidget() {
   const [mounted, setMounted] = useState(false);
   const [ethAmount, setEthAmount] = useState('');
   const [estimatedMini, setEstimatedMini] = useState('0');
-  const [quote, setQuote] = useState<OneInchQuote | null>(null);
-  const [swapData, setSwapData] = useState<OneInchSwap | null>(null);
-  const [isLoadingQuote, setIsLoadingQuote] = useState(false);
+  const [miniPrice, setMiniPrice] = useState<number | null>(null);
   const [isSwapping, setIsSwapping] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
@@ -52,12 +55,11 @@ export function SwapWidget() {
 
   useEffect(() => { setMounted(true); }, []);
 
-  // Handle transaction states
   useEffect(() => {
     if (isError) {
       setIsSwapping(false);
       setError('Transaction cancelled');
-      setTimeout(() => setError(''), 3000);
+      setTimeout(() => { setError(''); }, 3000);
       reset();
     }
   }, [isError, reset]);
@@ -71,8 +73,6 @@ export function SwapWidget() {
         setSuccess(false);
         setEthAmount('');
         setEstimatedMini('0');
-        setQuote(null);
-        setSwapData(null);
         reset();
       }, 4000);
     }
@@ -82,105 +82,72 @@ export function SwapWidget() {
     if (isPending || isConfirming) setIsSwapping(true);
   }, [isPending, isConfirming]);
 
-  // Fetch quote from 1inch
-  const fetchQuote = useCallback(async () => {
-    if (!ethAmount || parseFloat(ethAmount) <= 0 || !address) {
-      setQuote(null);
+  // Fetch price from DEXScreener
+  useEffect(() => {
+    const fetchPrice = async () => {
+      try {
+        const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${MINI_TOKEN.address}`);
+        const data = await res.json();
+        if (data.pairs?.[0]) {
+          setMiniPrice(parseFloat(data.pairs[0].priceNative));
+        }
+      } catch {}
+    };
+    fetchPrice();
+    const interval = setInterval(fetchPrice, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (!ethAmount || parseFloat(ethAmount) <= 0 || !miniPrice) {
       setEstimatedMini('0');
       return;
     }
+    const miniAmount = parseFloat(ethAmount) / miniPrice;
+    setEstimatedMini(miniAmount.toLocaleString(undefined, { maximumFractionDigits: 0 }));
+  }, [ethAmount, miniPrice]);
 
-    setIsLoadingQuote(true);
-    setError('');
-
-    try {
-      const amountIn = parseEther(ethAmount).toString();
-      
-      // 1inch quote API
-      const quoteUrl = new URL(`${ONE_INCH_API}/quote`);
-      quoteUrl.searchParams.set('fromTokenAddress', '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE');
-      quoteUrl.searchParams.set('toTokenAddress', MINI_TOKEN.address);
-      quoteUrl.searchParams.set('amount', amountIn);
-      quoteUrl.searchParams.set('fromAddress', address);
-      quoteUrl.searchParams.set('slippage', '5');
-
-      const quoteRes = await fetch(quoteUrl.toString(), {
-        headers: { 'Authorization': `Bearer ${API_KEY}` },
-      });
-
-      if (!quoteRes.ok) {
-        throw new Error('Quote failed');
-      }
-
-      const quoteData: OneInchQuote = await quoteRes.json();
-      setQuote(quoteData);
-
-      const outAmount = formatUnits(BigInt(quoteData.toTokenAmount), 18);
-      setEstimatedMini(parseFloat(outAmount).toLocaleString(undefined, { maximumFractionDigits: 0 }));
-
-      // Now get the swap transaction
-      const swapUrl = new URL(`${ONE_INCH_API}/swap`);
-      swapUrl.searchParams.set('fromTokenAddress', '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE');
-      swapUrl.searchParams.set('toTokenAddress', MINI_TOKEN.address);
-      swapUrl.searchParams.set('amount', amountIn);
-      swapUrl.searchParams.set('fromAddress', address);
-      swapUrl.searchParams.set('slippage', '5');
-      swapUrl.searchParams.set('allowPartialFill', 'true');
-
-      const swapRes = await fetch(swapUrl.toString(), {
-        headers: { 'Authorization': `Bearer ${API_KEY}` },
-      });
-
-      if (swapRes.ok) {
-        const swapResult: OneInchSwap = await swapRes.json();
-        setSwapData(swapResult);
-      }
-    } catch (err) {
-      console.error('Quote error:', err);
-      // Fallback to price estimate
-      try {
-        const priceRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${MINI_TOKEN.address}`);
-        const priceData = await priceRes.json();
-        if (priceData.pairs?.[0]) {
-          const miniPrice = parseFloat(priceData.pairs[0].priceNative);
-          const miniAmount = parseFloat(ethAmount) / miniPrice;
-          setEstimatedMini(miniAmount.toLocaleString(undefined, { maximumFractionDigits: 0 }));
-        }
-      } catch {}
-      setQuote(null);
-      setSwapData(null);
-    } finally {
-      setIsLoadingQuote(false);
-    }
-  }, [ethAmount, address]);
-
-  // Debounced quote fetch
-  useEffect(() => {
-    const timer = setTimeout(fetchQuote, 800);
-    return () => clearTimeout(timer);
-  }, [fetchQuote]);
-
-  // Execute swap
+  // Execute V4 swap via Universal Router
   const handleSwap = async () => {
-    if (!swapData || !address) {
-      setError('No swap available');
-      return;
-    }
-
+    if (!address || !ethAmount || parseFloat(ethAmount) <= 0 || !miniPrice) return;
+    
     setIsSwapping(true);
     setError('');
 
     try {
-      const tx = swapData.tx;
+      const amountIn = parseEther(ethAmount);
+      // 10% slippage for safety
+      const expectedOut = parseEther(ethAmount) / BigInt(Math.floor(miniPrice * 1e18)) * BigInt(1e18);
+      const amountOutMinimum = expectedOut * 90n / 100n;
+
+      // Build the swap data using V4SwapRouter.exactInputSingle
+      const swapData = encodeFunctionData({
+        abi: V4_ROUTER_ABI,
+        functionName: 'exactInputSingle',
+        args: [{
+          tokenIn: WETH,
+          tokenOut: MINI_TOKEN.address,
+          fee: 500, // 0.05% fee tier (common for new tokens)
+          tickSpacing: 10,
+          recipient: address,
+          amountIn: amountIn,
+          amountOutMinimum: amountOutMinimum,
+          sqrtPriceLimitX96: 0n,
+        }],
+      });
+
+      // Wrap ETH to WETH first, then swap
+      // For V4 with native ETH, we need to handle wrapping
+      
       sendTransaction({
-        to: tx.to as `0x${string}`,
-        data: tx.data as `0x${string}`,
-        value: BigInt(tx.value),
+        to: UNIVERSAL_ROUTER,
+        data: swapData as `0x${string}`,
+        value: amountIn,
       });
     } catch (err) {
       console.error('Swap error:', err);
       setIsSwapping(false);
-      setError('Swap failed - try again');
+      setError('Swap failed - V4 pool may use different fee tier');
     }
   };
 
@@ -190,14 +157,12 @@ export function SwapWidget() {
     if (!mounted) return 'Loading...';
     if (!isConnected) return 'Connect Wallet';
     if (!ethAmount || parseFloat(ethAmount) <= 0) return 'Enter Amount';
-    if (isLoadingQuote) return 'Getting Quote...';
     if (success) return '✓ Success!';
     if (isSwapping) return 'Swapping...';
-    if (!swapData) return 'No Route Found';
-    return '🔄 Swap Now';
+    return '🔄 Swap on V4';
   };
 
-  const canSwap = mounted && isConnected && ethAmount && parseFloat(ethAmount) > 0 && swapData && !isSwapping && !success && !isLoadingQuote;
+  const canSwap = mounted && isConnected && ethAmount && parseFloat(ethAmount) > 0 && !isSwapping && !success;
 
   const ethBal = mounted && ethBalance ? parseFloat(formatEther(ethBalance.value)).toFixed(4) : '0.0000';
   const miniBal = mounted && miniBalance ? parseFloat(formatUnits(miniBalance.value, 18)).toLocaleString() : '0';
@@ -260,7 +225,7 @@ export function SwapWidget() {
       </div>
 
       <div className="flex justify-center my-3">
-        <div className={`w-10 h-10 rounded-xl bg-[#1a1a25] flex items-center justify-center border border-[#2a2a3a] ${isLoadingQuote ? 'animate-pulse' : ''}`}>
+        <div className="w-10 h-10 rounded-xl bg-[#1a1a25] flex items-center justify-center border border-[#2a2a3a]">
           <svg className="w-5 h-5 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
           </svg>
@@ -269,13 +234,11 @@ export function SwapWidget() {
 
       <div className="bg-[#1a1a25] rounded-xl p-4 mb-4">
         <div className="flex justify-between mb-2">
-          <span className="text-xs text-gray-500">You receive {swapData ? '' : '(est.)'}</span>
+          <span className="text-xs text-gray-500">You receive (est.)</span>
           {mounted && isConnected && <span className="text-xs text-gray-500">Balance: {miniBal} MINI</span>}
         </div>
         <div className="flex items-center gap-3">
-          <span className={`flex-1 text-2xl font-bold gradient-text ${isLoadingQuote ? 'opacity-50' : ''}`}>
-            {isLoadingQuote ? '...' : estimatedMini || '0'}
-          </span>
+          <span className="flex-1 text-2xl font-bold gradient-text">{estimatedMini || '0'}</span>
           <div className="flex items-center gap-2 bg-[#252535] px-3 py-2 rounded-lg">
             <div className="w-6 h-6 rounded-full bg-gradient-to-br from-cyan-500 to-purple-600 flex items-center justify-center text-xs font-bold">M</div>
             <span className="font-semibold">MINI</span>
@@ -306,11 +269,11 @@ export function SwapWidget() {
         </div>
         <div className="flex justify-between">
           <span className="text-gray-500">Router</span>
-          <span className="text-white">1inch (Best Rate)</span>
+          <span className="text-white">Uniswap V4</span>
         </div>
         <div className="flex justify-between">
           <span className="text-gray-500">Slippage</span>
-          <span className="text-white">5%</span>
+          <span className="text-white">10%</span>
         </div>
       </div>
     </div>

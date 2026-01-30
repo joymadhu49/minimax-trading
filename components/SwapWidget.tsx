@@ -5,14 +5,12 @@ import { useState, useEffect } from 'react';
 import { useAccount, useBalance } from 'wagmi';
 import { formatEther, formatUnits } from 'viem';
 
-// LI.FI Widget configuration
-const LIFI_WIDGET_URL = 'https://li.finance/widget';
-
 export function SwapWidget() {
   const [mounted, setMounted] = useState(false);
   const [ethAmount, setEthAmount] = useState('');
   const [estimatedMini, setEstimatedMini] = useState('0');
   const [miniPrice, setMiniPrice] = useState<number | null>(null);
+  const [popupOpen, setPopupOpen] = useState(false);
   
   const { address, isConnected } = useAccount();
   const { data: ethBalance } = useBalance({ address });
@@ -47,18 +45,40 @@ export function SwapWidget() {
     setEstimatedMini(miniAmount.toLocaleString(undefined, { maximumFractionDigits: 0 }));
   }, [ethAmount, miniPrice]);
 
-  // Build LI.FI widget URL
-  const getWidgetUrl = () => {
-    const baseUrl = 'https://li.finance/widget';
+  // Build Uniswap URL with pre-filled values
+  const getSwapUrl = () => {
+    const baseUrl = 'https://app.uniswap.org/swap';
     const params = new URLSearchParams({
-      fromChain: '8453',
-      toChain: '8453',
-      fromToken: '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE',
-      toToken: MINI_TOKEN.address,
-      fromAddress: address || '',
-      amount: ethAmount || '0.01',
+      chain: 'base',
+      inputCurrency: 'ETH',
+      outputCurrency: MINI_TOKEN.address,
     });
+    if (ethAmount && parseFloat(ethAmount) > 0) {
+      params.set('exactAmount', ethAmount);
+      params.set('exactField', 'input');
+    }
     return `${baseUrl}?${params.toString()}`;
+  };
+
+  const handleSwap = () => {
+    const url = getSwapUrl();
+    // Open in centered popup
+    const width = 500;
+    const height = 700;
+    const left = (window.innerWidth - width) / 2 + window.screenX;
+    const top = (window.innerHeight - height) / 2 + window.screenY;
+    
+    window.open(
+      url,
+      'uniswap-swap',
+      `width=${width},height=${height},left=${left},top=${top},scrollbars=yes,resizable=yes`
+    );
+    
+    setPopupOpen(true);
+    
+    // Listen for window focus to know when user returns
+    const handleFocus = () => setPopupOpen(false);
+    window.addEventListener('focus', handleFocus);
   };
 
   const quickAmounts = ['0.01', '0.05', '0.1', '0.25'];
@@ -75,6 +95,12 @@ export function SwapWidget() {
           Live
         </span>
       </div>
+
+      {popupOpen && (
+        <div className="mb-4 p-3 bg-cyan-500/10 border border-cyan-500/30 rounded-xl text-cyan-400 text-sm">
+          Complete the swap in the popup window, then return here.
+        </div>
+      )}
 
       <div className="bg-[#1a1a25] rounded-xl p-4 mb-2">
         <div className="flex justify-between mb-2">
@@ -132,15 +158,16 @@ export function SwapWidget() {
         </div>
       </div>
 
-      {/* LI.FI embedded widget */}
-      <div className="relative" style={{ height: '500px' }}>
-        <iframe
-          src={getWidgetUrl()}
-          className="absolute inset-0 w-full h-full border-0 rounded-xl"
-          title="LI.FI Swap Widget"
-          allow="clipboard-write; web-share"
-        />
-      </div>
+      <button
+        onClick={handleSwap}
+        className="w-full text-lg py-4 rounded-xl font-semibold btn-primary glow-cyan"
+      >
+        🦄 Swap MINI
+      </button>
+
+      <p className="text-xs text-gray-500 text-center mt-3">
+        Opens Uniswap in popup. Complete swap there, return here when done.
+      </p>
 
       <div className="mt-4 space-y-2 text-xs">
         <div className="flex justify-between">
@@ -148,8 +175,8 @@ export function SwapWidget() {
           <span className="text-white">● Base</span>
         </div>
         <div className="flex justify-between">
-          <span className="text-gray-500">Aggregator</span>
-          <span className="text-white">LI.FI</span>
+          <span className="text-gray-500">DEX</span>
+          <span className="text-white">Uniswap V4</span>
         </div>
       </div>
     </div>

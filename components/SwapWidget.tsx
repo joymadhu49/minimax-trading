@@ -130,7 +130,7 @@ export function SwapWidget() {
     try {
       const amountIn = parseEther(ethAmount);
       const expectedOut = parseEther(ethAmount) / BigInt(Math.floor(miniPrice * 1e18)) * BigInt(1e18);
-      const amountOutMinimum = expectedOut * 85n / 100n; // 15% slippage
+      const amountOutMinimum = expectedOut * BigInt(85) / BigInt(100); // 15% slippage
 
       const tier = FEE_TIERS[selectedTier];
       

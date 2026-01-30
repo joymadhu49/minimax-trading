@@ -5,20 +5,26 @@ import { useState, useEffect, useCallback } from 'react';
 import { useAccount, useBalance, useSendTransaction, useWaitForTransactionReceipt } from 'wagmi';
 import { parseEther, formatEther, formatUnits } from 'viem';
 
-const ODOS_API = 'https://api.odos.xyz';
+const ONE_INCH_API = 'https://api.1inch.dev/swap/v6.0/8453';
 const CHAIN_ID = 8453; // Base
 
-interface OdosQuote {
-  pathId: string;
-  outAmounts: string[];
-  gasEstimate: number;
+// 1Inch API key - using public key (rate limited but works for testing)
+const API_KEY = 'K2C-22BsSdcRGLybBxS9LVZ2w4rRyKWc';
+
+interface OneInchQuote {
+  toTokenAmount: string;
+  fromTokenAmount: string;
+  protocols: { name: string; part: number }[][][];
+  estimatedGas: number;
 }
 
-interface OdosTransaction {
-  transaction: {
+interface OneInchSwap {
+  tx: {
+    from: string;
     to: string;
     data: string;
     value: string;
+    gasPrice: string;
     gas: number;
   };
 }
@@ -27,7 +33,8 @@ export function SwapWidget() {
   const [mounted, setMounted] = useState(false);
   const [ethAmount, setEthAmount] = useState('');
   const [estimatedMini, setEstimatedMini] = useState('0');
-  const [quote, setQuote] = useState<OdosQuote | null>(null);
+  const [quote, setQuote] = useState<OneInchQuote | null>(null);
+  const [swapData, setSwapData] = useState<OneInchSwap | null>(null);
   const [isLoadingQuote, setIsLoadingQuote] = useState(false);
   const [isSwapping, setIsSwapping] = useState(false);
   const [error, setError] = useState('');
@@ -65,6 +72,7 @@ export function SwapWidget() {
         setEthAmount('');
         setEstimatedMini('0');
         setQuote(null);
+        setSwapData(null);
         reset();
       }, 4000);
     }
@@ -74,7 +82,7 @@ export function SwapWidget() {
     if (isPending || isConfirming) setIsSwapping(true);
   }, [isPending, isConfirming]);
 
-  // Fetch quote from Odos
+  // Fetch quote from 1inch
   const fetchQuote = useCallback(async () => {
     if (!ethAmount || parseFloat(ethAmount) <= 0 || !address) {
       setQuote(null);
@@ -88,39 +96,44 @@ export function SwapWidget() {
     try {
       const amountIn = parseEther(ethAmount).toString();
       
-      // Get quote from Odos
-      const quoteRes = await fetch(`${ODOS_API}/sor/quote/v2`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chainId: CHAIN_ID,
-          inputTokens: [{
-            tokenAddress: '0x0000000000000000000000000000000000000000', // ETH
-            amount: amountIn,
-          }],
-          outputTokens: [{
-            tokenAddress: MINI_TOKEN.address,
-            proportion: 1,
-          }],
-          userAddr: address,
-          slippageLimitPercent: 5,
-          referralCode: 0,
-          compact: true,
-        }),
+      // 1inch quote API
+      const quoteUrl = new URL(`${ONE_INCH_API}/quote`);
+      quoteUrl.searchParams.set('fromTokenAddress', '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE');
+      quoteUrl.searchParams.set('toTokenAddress', MINI_TOKEN.address);
+      quoteUrl.searchParams.set('amount', amountIn);
+      quoteUrl.searchParams.set('fromAddress', address);
+      quoteUrl.searchParams.set('slippage', '5');
+
+      const quoteRes = await fetch(quoteUrl.toString(), {
+        headers: { 'Authorization': `Bearer ${API_KEY}` },
       });
 
       if (!quoteRes.ok) {
         throw new Error('Quote failed');
       }
 
-      const quoteData = await quoteRes.json();
-      
-      if (quoteData.outAmounts && quoteData.outAmounts[0]) {
-        setQuote(quoteData);
-        const outAmount = formatUnits(BigInt(quoteData.outAmounts[0]), 18);
-        setEstimatedMini(parseFloat(outAmount).toLocaleString(undefined, { maximumFractionDigits: 0 }));
-      } else {
-        throw new Error('No route found');
+      const quoteData: OneInchQuote = await quoteRes.json();
+      setQuote(quoteData);
+
+      const outAmount = formatUnits(BigInt(quoteData.toTokenAmount), 18);
+      setEstimatedMini(parseFloat(outAmount).toLocaleString(undefined, { maximumFractionDigits: 0 }));
+
+      // Now get the swap transaction
+      const swapUrl = new URL(`${ONE_INCH_API}/swap`);
+      swapUrl.searchParams.set('fromTokenAddress', '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE');
+      swapUrl.searchParams.set('toTokenAddress', MINI_TOKEN.address);
+      swapUrl.searchParams.set('amount', amountIn);
+      swapUrl.searchParams.set('fromAddress', address);
+      swapUrl.searchParams.set('slippage', '5');
+      swapUrl.searchParams.set('allowPartialFill', 'true');
+
+      const swapRes = await fetch(swapUrl.toString(), {
+        headers: { 'Authorization': `Bearer ${API_KEY}` },
+      });
+
+      if (swapRes.ok) {
+        const swapResult: OneInchSwap = await swapRes.json();
+        setSwapData(swapResult);
       }
     } catch (err) {
       console.error('Quote error:', err);
@@ -135,6 +148,7 @@ export function SwapWidget() {
         }
       } catch {}
       setQuote(null);
+      setSwapData(null);
     } finally {
       setIsLoadingQuote(false);
     }
@@ -148,8 +162,8 @@ export function SwapWidget() {
 
   // Execute swap
   const handleSwap = async () => {
-    if (!quote || !address) {
-      setError('No quote available');
+    if (!swapData || !address) {
+      setError('No swap available');
       return;
     }
 
@@ -157,28 +171,12 @@ export function SwapWidget() {
     setError('');
 
     try {
-      // Assemble transaction from Odos
-      const assembleRes = await fetch(`${ODOS_API}/sor/assemble`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userAddr: address,
-          pathId: quote.pathId,
-          simulate: false,
-        }),
-      });
-
-      if (!assembleRes.ok) {
-        throw new Error('Failed to assemble transaction');
-      }
-
-      const assembleData: OdosTransaction = await assembleRes.json();
-      const tx = assembleData.transaction;
-
+      const tx = swapData.tx;
       sendTransaction({
         to: tx.to as `0x${string}`,
         data: tx.data as `0x${string}`,
         value: BigInt(tx.value),
+        gasPrice: tx.gasPrice as `0x${string}`,
       });
     } catch (err) {
       console.error('Swap error:', err);
@@ -196,11 +194,11 @@ export function SwapWidget() {
     if (isLoadingQuote) return 'Getting Quote...';
     if (success) return '✓ Success!';
     if (isSwapping) return 'Swapping...';
-    if (!quote) return 'No Route Found';
+    if (!swapData) return 'No Route Found';
     return '🔄 Swap Now';
   };
 
-  const canSwap = mounted && isConnected && ethAmount && parseFloat(ethAmount) > 0 && quote && !isSwapping && !success && !isLoadingQuote;
+  const canSwap = mounted && isConnected && ethAmount && parseFloat(ethAmount) > 0 && swapData && !isSwapping && !success && !isLoadingQuote;
 
   const ethBal = mounted && ethBalance ? parseFloat(formatEther(ethBalance.value)).toFixed(4) : '0.0000';
   const miniBal = mounted && miniBalance ? parseFloat(formatUnits(miniBalance.value, 18)).toLocaleString() : '0';
@@ -272,7 +270,7 @@ export function SwapWidget() {
 
       <div className="bg-[#1a1a25] rounded-xl p-4 mb-4">
         <div className="flex justify-between mb-2">
-          <span className="text-xs text-gray-500">You receive {quote ? '' : '(est.)'}</span>
+          <span className="text-xs text-gray-500">You receive {swapData ? '' : '(est.)'}</span>
           {mounted && isConnected && <span className="text-xs text-gray-500">Balance: {miniBal} MINI</span>}
         </div>
         <div className="flex items-center gap-3">
@@ -309,7 +307,7 @@ export function SwapWidget() {
         </div>
         <div className="flex justify-between">
           <span className="text-gray-500">Router</span>
-          <span className="text-white">Odos (Best Price)</span>
+          <span className="text-white">1inch (Best Rate)</span>
         </div>
         <div className="flex justify-between">
           <span className="text-gray-500">Slippage</span>

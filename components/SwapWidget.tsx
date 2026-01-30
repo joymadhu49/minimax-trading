@@ -1,85 +1,24 @@
 'use client';
 
-import { MINI_TOKEN } from '@/lib/config';
+import { MINI_TOKEN, LINKS } from '@/lib/config';
 import { useState, useEffect } from 'react';
-import { useAccount, useBalance, useSendTransaction, useWaitForTransactionReceipt } from 'wagmi';
-import { parseEther, formatEther, formatUnits, encodeFunctionData } from 'viem';
-
-const UNISWAP_ROUTER = '0x2626664c2603336E57B271c5C0b26F421741e481';
-const WETH_ADDRESS = '0x4200000000000000000000000000000000000006';
-
-const SWAP_ABI = [{
-  inputs: [{
-    components: [
-      { name: 'tokenIn', type: 'address' },
-      { name: 'tokenOut', type: 'address' },
-      { name: 'fee', type: 'uint24' },
-      { name: 'recipient', type: 'address' },
-      { name: 'amountIn', type: 'uint256' },
-      { name: 'amountOutMinimum', type: 'uint256' },
-      { name: 'sqrtPriceLimitX96', type: 'uint160' },
-    ],
-    name: 'params',
-    type: 'tuple',
-  }],
-  name: 'exactInputSingle',
-  outputs: [{ name: 'amountOut', type: 'uint256' }],
-  stateMutability: 'payable',
-  type: 'function',
-}] as const;
+import { useAccount, useBalance } from 'wagmi';
+import { formatEther, formatUnits } from 'viem';
 
 export function SwapWidget() {
   const [mounted, setMounted] = useState(false);
   const [ethAmount, setEthAmount] = useState('');
   const [estimatedMini, setEstimatedMini] = useState('0');
   const [miniPrice, setMiniPrice] = useState<number | null>(null);
-  const [isSwapping, setIsSwapping] = useState(false);
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState(false);
   
   const { address, isConnected } = useAccount();
   const { data: ethBalance } = useBalance({ address });
-  const { data: miniBalance, refetch: refetchMini } = useBalance({
+  const { data: miniBalance } = useBalance({
     address,
     token: MINI_TOKEN.address,
   });
 
-  const { sendTransaction, data: txHash, isPending, isError, reset } = useSendTransaction();
-  const { isLoading: isConfirming, isSuccess: txSuccess } = useWaitForTransactionReceipt({ hash: txHash });
-
   useEffect(() => { setMounted(true); }, []);
-
-  // Reset on error or user cancel
-  useEffect(() => {
-    if (isError) {
-      setIsSwapping(false);
-      setError('Transaction cancelled or failed');
-      setTimeout(() => setError(''), 3000);
-      reset();
-    }
-  }, [isError, reset]);
-
-  // Handle success
-  useEffect(() => {
-    if (txSuccess) {
-      setIsSwapping(false);
-      setSuccess(true);
-      refetchMini();
-      setTimeout(() => {
-        setSuccess(false);
-        setEthAmount('');
-        setEstimatedMini('0');
-        reset();
-      }, 3000);
-    }
-  }, [txSuccess, refetchMini, reset]);
-
-  // Update swapping state
-  useEffect(() => {
-    if (isPending || isConfirming) {
-      setIsSwapping(true);
-    }
-  }, [isPending, isConfirming]);
 
   // Fetch price
   useEffect(() => {
@@ -107,54 +46,18 @@ export function SwapWidget() {
     setEstimatedMini(miniAmount.toLocaleString(undefined, { maximumFractionDigits: 0 }));
   }, [ethAmount, miniPrice]);
 
-  const handleSwap = async () => {
-    if (!address || !ethAmount || parseFloat(ethAmount) <= 0 || !miniPrice) return;
+  // Open Uniswap with pre-filled swap
+  const handleSwap = () => {
+    const amount = ethAmount || '0.01';
+    const url = `https://app.uniswap.org/swap?chain=base&inputCurrency=ETH&outputCurrency=${MINI_TOKEN.address}&value=${amount}`;
     
-    setError('');
-    setIsSwapping(true);
-    
-    try {
-      const amountIn = parseEther(ethAmount);
-      const expectedOut = BigInt(Math.floor(parseFloat(ethAmount) / miniPrice * 1e18));
-      const amountOutMin = expectedOut * BigInt(90) / BigInt(100); // 10% slippage
-
-      const swapData = encodeFunctionData({
-        abi: SWAP_ABI,
-        functionName: 'exactInputSingle',
-        args: [{
-          tokenIn: WETH_ADDRESS,
-          tokenOut: MINI_TOKEN.address,
-          fee: 10000,
-          recipient: address,
-          amountIn: amountIn,
-          amountOutMinimum: amountOutMin,
-          sqrtPriceLimitX96: BigInt(0),
-        }],
-      });
-
-      sendTransaction({
-        to: UNISWAP_ROUTER,
-        data: swapData,
-        value: amountIn,
-      });
-    } catch (err) {
-      setIsSwapping(false);
-      setError('Failed to prepare swap');
-    }
+    // Open in same tab for better wallet connection
+    window.location.href = url;
   };
 
   const quickAmounts = ['0.01', '0.05', '0.1', '0.25'];
   
-  const getButtonText = () => {
-    if (!mounted) return 'Loading...';
-    if (!isConnected) return 'Connect Wallet';
-    if (!ethAmount || parseFloat(ethAmount) <= 0) return 'Enter Amount';
-    if (success) return '✓ Success!';
-    if (isSwapping) return 'Swapping...';
-    return '🔄 Swap Now';
-  };
-
-  const canSwap = mounted && isConnected && ethAmount && parseFloat(ethAmount) > 0 && !isSwapping && !success;
+  const canSwap = mounted && isConnected && ethAmount && parseFloat(ethAmount) > 0;
 
   const ethBal = mounted && ethBalance ? parseFloat(formatEther(ethBalance.value)).toFixed(4) : '0.0000';
   const miniBal = mounted && miniBalance ? parseFloat(formatUnits(miniBalance.value, 18)).toLocaleString() : '0';
@@ -168,18 +71,6 @@ export function SwapWidget() {
           Live
         </span>
       </div>
-
-      {success && (
-        <div className="mb-4 p-4 bg-green-500/10 border border-green-500/30 rounded-xl text-green-400 text-center">
-          ✓ Swap successful!
-        </div>
-      )}
-
-      {error && (
-        <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400 text-sm text-center">
-          {error}
-        </div>
-      )}
 
       <div className="bg-[#1a1a25] rounded-xl p-4 mb-2">
         <div className="flex justify-between mb-2">
@@ -197,8 +88,7 @@ export function SwapWidget() {
             value={ethAmount}
             onChange={(e) => setEthAmount(e.target.value)}
             placeholder="0.0"
-            disabled={isSwapping}
-            className="flex-1 bg-transparent text-2xl font-bold text-white outline-none placeholder-gray-600 disabled:opacity-50"
+            className="flex-1 bg-transparent text-2xl font-bold text-white outline-none placeholder-gray-600"
           />
           <div className="flex items-center gap-2 bg-[#252535] px-3 py-2 rounded-lg">
             <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-xs">Ξ</div>
@@ -209,8 +99,8 @@ export function SwapWidget() {
 
       <div className="flex gap-2 mb-2">
         {quickAmounts.map((amt) => (
-          <button key={amt} onClick={() => setEthAmount(amt)} disabled={isSwapping}
-            className="flex-1 py-1.5 text-xs bg-[#1a1a25] hover:bg-[#252535] rounded-lg text-gray-400 hover:text-white transition-colors disabled:opacity-50">
+          <button key={amt} onClick={() => setEthAmount(amt)}
+            className="flex-1 py-1.5 text-xs bg-[#1a1a25] hover:bg-[#252535] rounded-lg text-gray-400 hover:text-white transition-colors">
             {amt}
           </button>
         ))}
@@ -239,20 +129,13 @@ export function SwapWidget() {
       </div>
 
       <button onClick={handleSwap} disabled={!canSwap}
-        className={`w-full text-lg py-4 rounded-xl font-semibold transition-all ${
-          success ? 'bg-green-500 text-white' : isSwapping ? 'bg-cyan-500/50 text-white' : 'btn-primary glow-cyan'
-        } disabled:opacity-50 disabled:cursor-not-allowed`}>
-        {isSwapping && <span className="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2"></span>}
-        {getButtonText()}
+        className="w-full text-lg py-4 rounded-xl font-semibold btn-primary glow-cyan disabled:opacity-50 disabled:cursor-not-allowed">
+        🦄 Swap on Uniswap
       </button>
-
-      {txHash && (
-        <div className="mt-3 text-center">
-          <a href={`https://basescan.org/tx/${txHash}`} target="_blank" className="text-xs text-cyan-400 hover:text-cyan-300">
-            View on Basescan →
-          </a>
-        </div>
-      )}
+      
+      <p className="text-xs text-gray-500 text-center mt-3">
+        Opens Uniswap with MINI pre-selected. Complete the swap there.
+      </p>
 
       <div className="mt-4 space-y-2 text-xs">
         <div className="flex justify-between">
@@ -260,8 +143,8 @@ export function SwapWidget() {
           <span className="text-white">● Base</span>
         </div>
         <div className="flex justify-between">
-          <span className="text-gray-500">Slippage</span>
-          <span className="text-white">10%</span>
+          <span className="text-gray-500">DEX</span>
+          <span className="text-white">Uniswap V4</span>
         </div>
       </div>
     </div>

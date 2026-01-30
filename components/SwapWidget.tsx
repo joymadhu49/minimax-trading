@@ -1,18 +1,15 @@
 'use client';
 
-import { MINI_TOKEN, WETH_TOKEN } from '@/lib/config';
+import { MINI_TOKEN } from '@/lib/config';
 import { useState, useEffect } from 'react';
 import { useAccount, useBalance, useSendTransaction, useWaitForTransactionReceipt } from 'wagmi';
-import { parseEther, formatEther, formatUnits, encodeFunctionData, keccak256, toHex } from 'viem';
+import { parseEther, formatEther, formatUnits, encodeFunctionData } from 'viem';
 
 // Uniswap V4 contracts on Base
 const UNIVERSAL_ROUTER = '0x6ff5693b99212da76ad316178a184ab56d299b43' as `0x${string}`;
 const WETH = '0x4200000000000000000000000000000000000006' as `0x${string}`;
 
-// Universal Router commands
-const V4_SWAP = BigInt(0x10);
-
-// V4SwapRouter ABI for exactInputSingle
+// V4SwapRouter ABI
 const V4_ROUTER_ABI = [{
   type: 'function',
   name: 'exactInputSingle',
@@ -34,14 +31,25 @@ const V4_ROUTER_ABI = [{
   outputs: [{ name: 'amountOut', type: 'uint256' }],
 }] as const;
 
+// Common V4 fee tiers
+const FEE_TIERS = [
+  { fee: 100, tickSpacing: 1, label: '0.01%' },
+  { fee: 500, tickSpacing: 10, label: '0.05%' },
+  { fee: 1000, tickSpacing: 50, label: '0.1%' },
+  { fee: 3000, tickSpacing: 60, label: '0.3%' },
+  { fee: 10000, tickSpacing: 200, label: '1%' },
+];
+
 export function SwapWidget() {
   const [mounted, setMounted] = useState(false);
   const [ethAmount, setEthAmount] = useState('');
   const [estimatedMini, setEstimatedMini] = useState('0');
   const [miniPrice, setMiniPrice] = useState<number | null>(null);
+  const [selectedTier, setSelectedTier] = useState(1);
   const [isSwapping, setIsSwapping] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
+  const [lastTxFee, setLastTxFee] = useState<number | null>(null);
   
   const { address, isConnected } = useAccount();
   const { data: ethBalance } = useBalance({ address });
@@ -50,19 +58,25 @@ export function SwapWidget() {
     token: MINI_TOKEN.address,
   });
 
-  const { sendTransaction, data: txHash, isPending, isError, reset } = useSendTransaction();
+  const { sendTransaction, data: txHash, isPending, isError, reset, error: txError } = useSendTransaction();
   const { isLoading: isConfirming, isSuccess: txSuccess } = useWaitForTransactionReceipt({ hash: txHash });
 
   useEffect(() => { setMounted(true); }, []);
 
   useEffect(() => {
-    if (isError) {
+    if (isError && txError) {
       setIsSwapping(false);
-      setError('Transaction cancelled');
-      setTimeout(() => { setError(''); }, 3000);
+      const errMsg = txError.message || 'Transaction failed';
+      // Extract fee tier from error if present
+      if (errMsg.includes('fee') || errMsg.includes('tick')) {
+        setError(`Wrong fee tier. Try a different one.`);
+      } else {
+        setError('Transaction cancelled or failed');
+      }
+      setTimeout(() => { setError(''); }, 4000);
       reset();
     }
-  }, [isError, reset]);
+  }, [isError, txError, reset]);
 
   useEffect(() => {
     if (txSuccess) {
@@ -73,6 +87,7 @@ export function SwapWidget() {
         setSuccess(false);
         setEthAmount('');
         setEstimatedMini('0');
+        setLastTxFee(null);
         reset();
       }, 4000);
     }
@@ -82,7 +97,6 @@ export function SwapWidget() {
     if (isPending || isConfirming) setIsSwapping(true);
   }, [isPending, isConfirming]);
 
-  // Fetch price from DEXScreener
   useEffect(() => {
     const fetchPrice = async () => {
       try {
@@ -107,7 +121,6 @@ export function SwapWidget() {
     setEstimatedMini(miniAmount.toLocaleString(undefined, { maximumFractionDigits: 0 }));
   }, [ethAmount, miniPrice]);
 
-  // Execute V4 swap via Universal Router
   const handleSwap = async () => {
     if (!address || !ethAmount || parseFloat(ethAmount) <= 0 || !miniPrice) return;
     
@@ -116,19 +129,19 @@ export function SwapWidget() {
 
     try {
       const amountIn = parseEther(ethAmount);
-      // 10% slippage for safety
       const expectedOut = parseEther(ethAmount) / BigInt(Math.floor(miniPrice * 1e18)) * BigInt(1e18);
-      const amountOutMinimum = expectedOut * BigInt(90) / BigInt(100);
+      const amountOutMinimum = expectedOut * 85n / 100n; // 15% slippage
 
-      // Build the swap data using V4SwapRouter.exactInputSingle
+      const tier = FEE_TIERS[selectedTier];
+      
       const swapData = encodeFunctionData({
         abi: V4_ROUTER_ABI,
         functionName: 'exactInputSingle',
         args: [{
           tokenIn: WETH,
           tokenOut: MINI_TOKEN.address,
-          fee: 500, // 0.05% fee tier (common for new tokens)
-          tickSpacing: 10,
+          fee: tier.fee,
+          tickSpacing: tier.tickSpacing,
           recipient: address,
           amountIn: amountIn,
           amountOutMinimum: amountOutMinimum,
@@ -136,9 +149,8 @@ export function SwapWidget() {
         }],
       });
 
-      // Wrap ETH to WETH first, then swap
-      // For V4 with native ETH, we need to handle wrapping
-      
+      setLastTxFee(tier.fee);
+
       sendTransaction({
         to: UNIVERSAL_ROUTER,
         data: swapData as `0x${string}`,
@@ -147,7 +159,7 @@ export function SwapWidget() {
     } catch (err) {
       console.error('Swap error:', err);
       setIsSwapping(false);
-      setError('Swap failed - V4 pool may use different fee tier');
+      setError('Failed to prepare swap');
     }
   };
 
@@ -159,7 +171,7 @@ export function SwapWidget() {
     if (!ethAmount || parseFloat(ethAmount) <= 0) return 'Enter Amount';
     if (success) return '✓ Success!';
     if (isSwapping) return 'Swapping...';
-    return '🔄 Swap on V4';
+    return `🔄 Swap (${FEE_TIERS[selectedTier].label})`;
   };
 
   const canSwap = mounted && isConnected && ethAmount && parseFloat(ethAmount) > 0 && !isSwapping && !success;
@@ -215,13 +227,34 @@ export function SwapWidget() {
         </div>
       </div>
 
-      <div className="flex gap-2 mb-2">
+      <div className="flex gap-2 mb-3">
         {quickAmounts.map((amt) => (
           <button key={amt} onClick={() => setEthAmount(amt)} disabled={isSwapping}
             className="flex-1 py-1.5 text-xs bg-[#1a1a25] hover:bg-[#252535] rounded-lg text-gray-400 hover:text-white transition-colors disabled:opacity-50">
             {amt}
           </button>
         ))}
+      </div>
+
+      {/* Fee tier selector */}
+      <div className="mb-3">
+        <p className="text-xs text-gray-500 mb-2">Fee tier (try different if swap fails):</p>
+        <div className="flex flex-wrap gap-2">
+          {FEE_TIERS.map((tier, idx) => (
+            <button
+              key={tier.fee}
+              onClick={() => setSelectedTier(idx)}
+              disabled={isSwapping}
+              className={`px-3 py-1.5 text-xs rounded-lg transition-colors ${
+                selectedTier === idx 
+                  ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/50' 
+                  : 'bg-[#1a1a25] text-gray-400 hover:bg-[#252535]'
+              } disabled:opacity-50`}
+            >
+              {tier.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="flex justify-center my-3">
@@ -257,7 +290,7 @@ export function SwapWidget() {
       {txHash && (
         <div className="mt-3 text-center">
           <a href={`https://basescan.org/tx/${txHash}`} target="_blank" className="text-xs text-cyan-400 hover:text-cyan-300">
-            View on Basescan →
+            View on Basescan {lastTxFee && `(fee: ${FEE_TIERS.find(t => t.fee === lastTxFee)?.label})`} →
           </a>
         </div>
       )}
@@ -273,7 +306,7 @@ export function SwapWidget() {
         </div>
         <div className="flex justify-between">
           <span className="text-gray-500">Slippage</span>
-          <span className="text-white">10%</span>
+          <span className="text-white">15%</span>
         </div>
       </div>
     </div>
